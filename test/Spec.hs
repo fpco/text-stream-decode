@@ -17,12 +17,12 @@ try' a = try $ evaluate (a `deepseq` a)
 
 main :: IO ()
 main = hspec $ modifyMaxSuccess (const 10000) $ do
-    let test name lazy stream encodeStrict = describe name $ do
+    let test name lazy stream encodeLazy encodeStrict = describe name $ do
             prop "bytes" $ check lazy stream
             prop "chars" $ \css -> do
                 let ts = map T.pack css
                     lt = TL.fromChunks ts
-                    lbs = TLE.encodeUtf8 lt
+                    lbs = encodeLazy lt
                     bss = L.toChunks lbs
                     wss = map S.unpack bss
                  in check lazy stream wss
@@ -46,12 +46,12 @@ main = hspec $ modifyMaxSuccess (const 10000) $ do
                 (Right x', Right y') -> x' `shouldBe` y'
                 (Left _, Left _) -> return ()
                 _ -> error $ show (x, y)
-    test "UTF8" TLE.decodeUtf8 SD.streamUtf8 TE.encodeUtf8
-    test "UTF8 pure" TLE.decodeUtf8 SD.streamUtf8Pure TE.encodeUtf8
-    test "UTF16LE" TLE.decodeUtf16LE SD.streamUtf16LE TE.encodeUtf16LE
-    test "UTF16BE" TLE.decodeUtf16BE SD.streamUtf16BE TE.encodeUtf16BE
-    test "UTF32LE" TLE.decodeUtf32LE SD.streamUtf32LE TE.encodeUtf32LE
-    test "UTF32BE" TLE.decodeUtf32BE SD.streamUtf32BE TE.encodeUtf32BE
+    test "UTF8" TLE.decodeUtf8 SD.streamUtf8 TLE.encodeUtf8 TE.encodeUtf8
+    test "UTF8 pure" TLE.decodeUtf8 SD.streamUtf8Pure TLE.encodeUtf8 TE.encodeUtf8
+    test "UTF16LE" TLE.decodeUtf16LE SD.streamUtf16LE TLE.encodeUtf16LE TE.encodeUtf16LE
+    test "UTF16BE" TLE.decodeUtf16BE SD.streamUtf16BE TLE.encodeUtf16BE TE.encodeUtf16BE
+    test "UTF32LE" TLE.decodeUtf32LE SD.streamUtf32LE TLE.encodeUtf32LE TE.encodeUtf32LE
+    test "UTF32BE" TLE.decodeUtf32BE SD.streamUtf32BE TLE.encodeUtf32BE TE.encodeUtf32BE
 
     describe "UTF8 leftovers" $ do
         describe "C" $ do
