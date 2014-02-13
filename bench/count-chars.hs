@@ -4,17 +4,17 @@ import qualified Data.Text.Lazy as TL
 import qualified Data.Text.Lazy.Encoding as TLE
 import qualified Data.ByteString as S
 import qualified Data.ByteString.Lazy as L
+import Data.ByteString.Lazy.Internal (ByteString (..))
 import Data.Text.StreamDecoding
-import Data.Text.Encoding (decodeUtf8)
 
 calcLen :: (S.ByteString -> DecodeResult)
-        -> [S.ByteString]
+        -> L.ByteString
         -> Int
 calcLen =
     loop 0
   where
-    loop total _ [] = total
-    loop total dec (bs:bss) =
+    loop total _ Empty = total
+    loop total dec (Chunk bs bss) =
         total' `seq` loop total' dec' bss
       where
         DecodeResultSuccess t dec' = dec bs
@@ -28,12 +28,11 @@ handleEncoding :: ( String
                -> Benchmark
 handleEncoding (name, encodeLazy, decodeLazy, decodeStream) = bgroup name
     [ bench "lazy" $ whnf (TL.length . decodeLazy) lbs
-    , bench "stream" $ whnf (calcLen decodeStream) bss
+    , bench "stream" $ whnf (calcLen decodeStream) lbs
     ]
   where
     text = TL.pack $ concat $ replicate 10 ['\27'..'\2003']
     lbs = encodeLazy text
-    bss = L.toChunks lbs
 
 main :: IO ()
 main = defaultMain $ map handleEncoding

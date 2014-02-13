@@ -42,6 +42,7 @@ module Data.Text.StreamDecoding
 
 import           Control.Monad.ST                  (ST, runST)
 import qualified Data.ByteString                   as B
+import Data.Bits ((.|.))
 import qualified Data.ByteString.Unsafe            as B
 import           Data.Text                         (Text)
 import qualified Data.Text                         as T
@@ -52,35 +53,25 @@ import qualified Data.Text.Internal.Encoding.Utf32 as U32
 import qualified Data.Text.Internal.Encoding.Utf8  as U8
 import           Data.Text.Internal.Unsafe.Char    (unsafeChr, unsafeChr32,
                                                     unsafeChr8)
-import           Data.Text.Internal.Unsafe.Char    (ord, unsafeWrite)
+import           Data.Text.Internal.Unsafe.Char    (unsafeWrite)
 import           Data.Text.Internal.Unsafe.Shift   (shiftL)
-import           Data.Word                         (Word16, Word32, Word8)
+import           Data.Word                         (Word8)
 
 data S = S0
        | S1 {-# UNPACK #-} !Word8
        | S2 {-# UNPACK #-} !Word8 {-# UNPACK #-} !Word8
        | S3 {-# UNPACK #-} !Word8 {-# UNPACK #-} !Word8 {-# UNPACK #-} !Word8
-       | S4 {-# UNPACK #-} !Word8 {-# UNPACK #-} !Word8 {-# UNPACK #-} !Word8 {-# UNPACK #-} !Word8
     deriving Show
 
 data DecodeResult
     = DecodeResultSuccess !Text !(B.ByteString -> DecodeResult)
     | DecodeResultFailure !Text !B.ByteString
 
-data Status s = Status
-    !Int -- ^ position in ByteString
-    !Int -- ^ position in Array
-    !Int -- ^ array size
-    !(A.MArray s)
-    !B.ByteString
-    !S
-
 toBS :: S -> B.ByteString
 toBS S0 = B.empty
 toBS (S1 a) = B.pack [a]
 toBS (S2 a b) = B.pack [a, b]
 toBS (S3 a b c) = B.pack [a, b, c]
-toBS (S4 a b c d) = B.pack [a, b, c, d]
 {-# INLINE toBS #-}
 
 getText :: Int -> A.MArray s -> ST s Text
@@ -88,65 +79,6 @@ getText j marr = do
     arr <- A.unsafeFreeze marr
     return $! textP arr 0 j
 {-# INLINE getText #-}
-
-addChar :: Status s
-        -> (Status s -> ST s b)
-        -> Int -- ^ delta of i
-        -> Char
-        -> ST s b
-addChar (Status i j size marr ps _) next deltai c
-    | tooSmall >= size = do
-        let size' = (size + 1) `shiftL` 1
-        marr' <- A.new size'
-        A.copyM marr' 0 marr 0 size
-        addChar (Status i j size' marr' ps S0) next deltai c
-    | otherwise = do
-        d <- unsafeWrite marr j c
-        next (Status (i + deltai) (j + d) size marr ps S0)
-  where
-    tooSmall
-        | ord c < 0x10000 = j + 1
-        | otherwise       = j
-{-# INLINE addChar #-}
-
-handleNull :: (B.ByteString -> DecodeResult)
-           -> (forall s. Status s -> ST s DecodeResult)
-           -> S
-           -> B.ByteString
-           -> DecodeResult
-handleNull stream f s bs
-    | B.null bs =
-        case s of
-            S0 -> DecodeResultSuccess T.empty stream
-            _  -> DecodeResultFailure T.empty $ toBS s
-    | otherwise = runST $ do
-        let initLen = B.length bs
-        marr <- A.new initLen
-        f $! Status 0 0 initLen marr bs s
-{-# INLINE handleNull #-}
-
-consume :: Status s
-        -> (Status s -> ST s DecodeResult)
-        -> (S -> B.ByteString -> DecodeResult)
-        -> ST s DecodeResult
-consume (Status i j size marr ps s) next streamStart
-    | i >= B.length ps = do
-        t <- getText j marr
-        return $! DecodeResultSuccess t (streamStart s)
-    | otherwise =
-  case s of
-    S0         -> next' (S1 x)
-    S1 a       -> next' (S2 a x)
-    S2 a b     -> next' (S3 a b x)
-    S3 a b c   -> next' (S4 a b c x)
-    S4 a b c d -> do
-        t <- getText j marr
-        let ps' = B.pack [a, b, c, d] `B.append` ps
-        return $! DecodeResultFailure t ps'
-    where
-        x = B.unsafeIndex ps i
-        next' s' = next (Status (i + 1) j size marr ps s')
-{-# INLINE consume #-}
 
 -- | /O(n)/ Convert a lazy 'ByteString' into a 'Stream Char', using
 -- UTF-8 encoding.
@@ -216,127 +148,269 @@ streamUtf8 =
 -- | /O(n)/ Convert a 'ByteString' into a 'Stream Char', using little
 -- endian UTF-16 encoding.
 streamUtf16LE :: B.ByteString -> DecodeResult
-streamUtf16LE = streamUtf16LEStart S0
-
-streamUtf16LEStart :: S -> B.ByteString -> DecodeResult
-streamUtf16LEStart =
-    handleNull streamUtf16LE next
+streamUtf16LE =
+    beginChunk S0
   where
-    next st@(Status i _j _size _marr ps S0)
-      | i + 1 < len && U16.validate1 x1    = addChar st next 2 (unsafeChr x1)
-      | i + 3 < len && U16.validate2 x1 x2 = addChar st next 4 (U16.chr2 x1 x2)
-      where len = B.length ps
-            x1   = c (idx  i)      (idx (i + 1))
-            x2   = c (idx (i + 2)) (idx (i + 3))
-            c w1 w2 = w1 + (w2 `shiftL` 8)
-            idx = fromIntegral . B.unsafeIndex ps :: Int -> Word16
-    next st@(Status _i _j _size _marr _bs s) =
-      case s of
-        S2 w1 w2       | U16.validate1 (c w1 w2)           ->
-            addChar st next 0 (unsafeChr (c w1 w2))
-        S4 w1 w2 w3 w4 | U16.validate2 (c w1 w2) (c w3 w4) ->
-            addChar st next 0 (U16.chr2 (c w1 w2) (c w3 w4))
-        _ -> consume st next streamUtf16LEStart
-       where c :: Word8 -> Word8 -> Word16
-             c w1 w2 = fromIntegral w1 + (fromIntegral w2 `shiftL` 8)
-{-# INLINE [0] streamUtf16LE #-}
-{-# INLINE [0] streamUtf16LEStart #-}
+    beginChunk :: S -> B.ByteString -> DecodeResult
+    beginChunk s bs | B.null bs =
+        case s of
+            S0 -> DecodeResultSuccess T.empty (beginChunk S0)
+            _  -> DecodeResultFailure T.empty $ toBS s
+    beginChunk s0 ps = runST $ do
+        let initLen = B.length ps `div` 2
+        marr <- A.new (initLen + 1)
+        let start !i !j
+                | i >= len = do
+                    t <- getText j marr
+                    return $! DecodeResultSuccess t (beginChunk S0)
+                | i + 1 < len && U16.validate1 x1    = addChar' 2 (unsafeChr x1)
+                | i + 3 < len && U16.validate2 x1 x2 = addChar' 4 (U16.chr2 x1 x2)
+                | i + 3 < len = do
+                    t <- getText j marr
+                    return $! DecodeResultFailure t (B.unsafeDrop i ps)
+                | i + 2 < len = continue (S3 a b c)
+                | i + 1 < len = continue (S2 a b)
+                | otherwise   = continue (S1 a)
+                  where
+                    a = B.unsafeIndex ps i
+                    b = B.unsafeIndex ps (i+1)
+                    c = B.unsafeIndex ps (i+2)
+                    d = B.unsafeIndex ps (i+3)
+                    x1   = combine a b
+                    x2   = combine c d
+                    addChar' deltai char = do
+                        deltaj <- unsafeWrite marr j char
+                        start (i + deltai) (j + deltaj)
+                    continue s = do
+                        t <- getText j marr
+                        return $! DecodeResultSuccess t (beginChunk s)
+
+            checkCont s !i | i >= len = return $! DecodeResultSuccess T.empty (beginChunk s)
+            checkCont s !i =
+                case s of
+                    S0 -> start i 0
+                    S1 a ->
+                        let x1 = combine a x
+                         in if U16.validate1 x1
+                                then addChar' (unsafeChr x1)
+                                else checkCont (S2 a x) (i + 1)
+                    S2 a b -> checkCont (S3 a b x) (i + 1)
+                    S3 a b c ->
+                        let x1 = combine a b
+                            x2 = combine c x
+                         in if U16.validate2 x1 x2
+                                then addChar' (U16.chr2 x1 x2)
+                                else return $! DecodeResultFailure T.empty
+                                            $! B.append (toBS s) (B.unsafeDrop i ps)
+              where
+                x = B.unsafeIndex ps i
+                addChar' c = do
+                    d <- unsafeWrite marr 0 c
+                    start (i + 1) d
+
+        checkCont s0 0
+      where
+        len = B.length ps
+        combine w1 w2 = fromIntegral w1 .|. (fromIntegral w2 `shiftL` 8)
+    {-# INLINE beginChunk #-}
 
 -- | /O(n)/ Convert a 'ByteString' into a 'Stream Char', using big
 -- endian UTF-16 encoding.
 streamUtf16BE :: B.ByteString -> DecodeResult
-streamUtf16BE = streamUtf16BEStart S0
-
-streamUtf16BEStart :: S -> B.ByteString -> DecodeResult
-streamUtf16BEStart =
-    handleNull streamUtf16BE next
+streamUtf16BE =
+    beginChunk S0
   where
-    next st@(Status i _j _size _marr ps S0)
-      | i + 1 < len && U16.validate1 x1    = addChar st next 2 (unsafeChr x1)
-      | i + 3 < len && U16.validate2 x1 x2 = addChar st next 4 (U16.chr2 x1 x2)
-      where len = B.length ps
-            x1   = c (idx  i)      (idx (i + 1))
-            x2   = c (idx (i + 2)) (idx (i + 3))
-            c w1 w2 = (w1 `shiftL` 8) + w2
-            idx = fromIntegral . B.unsafeIndex ps :: Int -> Word16
-    next st@(Status _i _j _size _marr _ps s) =
-      case s of
-        S2 w1 w2       | U16.validate1 (c w1 w2)           ->
-          addChar st next 0 (unsafeChr (c w1 w2))
-        S4 w1 w2 w3 w4 | U16.validate2 (c w1 w2) (c w3 w4) ->
-          addChar st next 0 (U16.chr2 (c w1 w2) (c w3 w4))
-        _ -> consume st next streamUtf16BEStart
-       where c :: Word8 -> Word8 -> Word16
-             c w1 w2 = (fromIntegral w1 `shiftL` 8) + fromIntegral w2
-{-# INLINE [0] streamUtf16BE #-}
-{-# INLINE [0] streamUtf16BEStart #-}
+    beginChunk :: S -> B.ByteString -> DecodeResult
+    beginChunk s bs | B.null bs =
+        case s of
+            S0 -> DecodeResultSuccess T.empty (beginChunk S0)
+            _  -> DecodeResultFailure T.empty $ toBS s
+    beginChunk s0 ps = runST $ do
+        let initLen = B.length ps `div` 2
+        marr <- A.new (initLen + 1)
+        let start !i !j
+                | i >= len = do
+                    t <- getText j marr
+                    return $! DecodeResultSuccess t (beginChunk S0)
+                | i + 1 < len && U16.validate1 x1    = addChar' 2 (unsafeChr x1)
+                | i + 3 < len && U16.validate2 x1 x2 = addChar' 4 (U16.chr2 x1 x2)
+                | i + 3 < len = do
+                    t <- getText j marr
+                    return $! DecodeResultFailure t (B.unsafeDrop i ps)
+                | i + 2 < len = continue (S3 a b c)
+                | i + 1 < len = continue (S2 a b)
+                | otherwise   = continue (S1 a)
+                  where
+                    a = B.unsafeIndex ps i
+                    b = B.unsafeIndex ps (i+1)
+                    c = B.unsafeIndex ps (i+2)
+                    d = B.unsafeIndex ps (i+3)
+                    x1   = combine a b
+                    x2   = combine c d
+                    addChar' deltai char = do
+                        deltaj <- unsafeWrite marr j char
+                        start (i + deltai) (j + deltaj)
+                    continue s = do
+                        t <- getText j marr
+                        return $! DecodeResultSuccess t (beginChunk s)
 
--- | /O(n)/ Convert a 'ByteString' into a 'Stream Char', using big
--- endian UTF-32 encoding.
-streamUtf32BE :: B.ByteString -> DecodeResult
-streamUtf32BE = streamUtf32BEStart S0
-
-streamUtf32BEStart :: S -> B.ByteString -> DecodeResult
-streamUtf32BEStart =
-    handleNull streamUtf32BE next
-  where
-    next st@(Status i _j _size _marr ps S0)
-      | i + 3 < len && U32.validate x =
-          addChar st next 4 (unsafeChr32 x)
-      where len = B.length ps
-            x = shiftL x1 24 + shiftL x2 16 + shiftL x3 8 + x4
-            x1    = idx i
-            x2    = idx (i+1)
-            x3    = idx (i+2)
-            x4    = idx (i+3)
-            idx = fromIntegral . B.unsafeIndex ps :: Int -> Word32
-    next st@(Status _i _j _size _marr _ps s) =
-      case s of
-        S4 w1 w2 w3 w4 | U32.validate (c w1 w2 w3 w4) ->
-          addChar st next 0 (unsafeChr32 (c w1 w2 w3 w4))
-        _ -> consume st next streamUtf32BEStart
-       where c :: Word8 -> Word8 -> Word8 -> Word8 -> Word32
-             c w1 w2 w3 w4 = shifted
+            checkCont s !i | i >= len = return $! DecodeResultSuccess T.empty (beginChunk s)
+            checkCont s !i =
+                case s of
+                    S0 -> start i 0
+                    S1 a ->
+                        let x1 = combine a x
+                         in if U16.validate1 x1
+                                then addChar' (unsafeChr x1)
+                                else checkCont (S2 a x) (i + 1)
+                    S2 a b -> checkCont (S3 a b x) (i + 1)
+                    S3 a b c ->
+                        let x1 = combine a b
+                            x2 = combine c x
+                         in if U16.validate2 x1 x2
+                                then addChar' (U16.chr2 x1 x2)
+                                else return $! DecodeResultFailure T.empty
+                                            $! B.append (toBS s) (B.unsafeDrop i ps)
               where
-               shifted = shiftL x1 24 + shiftL x2 16 + shiftL x3 8 + x4
-               x1 = fromIntegral w1
-               x2 = fromIntegral w2
-               x3 = fromIntegral w3
-               x4 = fromIntegral w4
-{-# INLINE [0] streamUtf32BE #-}
-{-# INLINE [0] streamUtf32BEStart #-}
+                x = B.unsafeIndex ps i
+                addChar' c = do
+                    d <- unsafeWrite marr 0 c
+                    start (i + 1) d
+
+        checkCont s0 0
+      where
+        len = B.length ps
+        combine w1 w2 = (fromIntegral w1 `shiftL` 8) .|. fromIntegral w2
+    {-# INLINE beginChunk #-}
 
 -- | /O(n)/ Convert a 'ByteString' into a 'Stream Char', using little
 -- endian UTF-32 encoding.
 streamUtf32LE :: B.ByteString -> DecodeResult
-streamUtf32LE = streamUtf32LEStart S0
-
-streamUtf32LEStart :: S -> B.ByteString -> DecodeResult
-streamUtf32LEStart =
-    handleNull streamUtf32LE next
+streamUtf32LE =
+    beginChunk S0
   where
-    next st@(Status i _j _size _marr ps S0)
-      | i + 3 < len && U32.validate x =
-          addChar st next 4 (unsafeChr32 x)
-      where len = B.length ps
-            x = shiftL x4 24 + shiftL x3 16 + shiftL x2 8 + x1
-            x1    = idx i
-            x2    = idx (i+1)
-            x3    = idx (i+2)
-            x4    = idx (i+3)
-            idx = fromIntegral . B.unsafeIndex ps :: Int -> Word32
-    next st@(Status _i _j _size _marr _ps s) =
-      case s of
-        S4 w1 w2 w3 w4 | U32.validate (c w1 w2 w3 w4) ->
-          addChar st next 0 (unsafeChr32 (c w1 w2 w3 w4))
-        _ -> consume st next streamUtf32LEStart
-       where c :: Word8 -> Word8 -> Word8 -> Word8 -> Word32
-             c w1 w2 w3 w4 = shifted
+    beginChunk :: S -> B.ByteString -> DecodeResult
+    beginChunk s bs | B.null bs =
+        case s of
+            S0 -> DecodeResultSuccess T.empty (beginChunk S0)
+            _  -> DecodeResultFailure T.empty $ toBS s
+    beginChunk s0 ps = runST $ do
+        let initLen = B.length ps `div` 4
+        marr <- A.new (initLen + 1)
+        let start !i !j
+                | i >= len = do
+                    t <- getText j marr
+                    return $! DecodeResultSuccess t (beginChunk S0)
+                | i + 3 < len && U32.validate x1 = addChar' 4 (unsafeChr32 x1)
+                | i + 3 < len = do
+                    t <- getText j marr
+                    return $! DecodeResultFailure t (B.unsafeDrop i ps)
+                | i + 2 < len = continue (S3 a b c)
+                | i + 1 < len = continue (S2 a b)
+                | otherwise   = continue (S1 a)
+                  where
+                    a = B.unsafeIndex ps i
+                    b = B.unsafeIndex ps (i+1)
+                    c = B.unsafeIndex ps (i+2)
+                    d = B.unsafeIndex ps (i+3)
+                    x1   = combine a b c d
+                    addChar' deltai char = do
+                        deltaj <- unsafeWrite marr j char
+                        start (i + deltai) (j + deltaj)
+                    continue s = do
+                        t <- getText j marr
+                        return $! DecodeResultSuccess t (beginChunk s)
+
+            checkCont s !i | i >= len = return $! DecodeResultSuccess T.empty (beginChunk s)
+            checkCont s !i =
+                case s of
+                    S0 -> start i 0
+                    S1 a -> checkCont (S2 a x) (i + 1)
+                    S2 a b -> checkCont (S3 a b x) (i + 1)
+                    S3 a b c ->
+                        let x1 = combine a b c x
+                         in if U32.validate x1
+                                then addChar' (unsafeChr32 x1)
+                                else return $! DecodeResultFailure T.empty
+                                            $! B.append (toBS s) (B.unsafeDrop i ps)
               where
-               shifted = shiftL x4 24 + shiftL x3 16 + shiftL x2 8 + x1
-               x1 = fromIntegral w1
-               x2 = fromIntegral w2
-               x3 = fromIntegral w3
-               x4 = fromIntegral w4
-{-# INLINE [0] streamUtf32LE #-}
-{-# INLINE [0] streamUtf32LEStart #-}
+                x = B.unsafeIndex ps i
+                addChar' c = do
+                    d <- unsafeWrite marr 0 c
+                    start (i + 1) d
+
+        checkCont s0 0
+      where
+        len = B.length ps
+        combine w1 w2 w3 w4 =
+                shiftL (fromIntegral w4) 24
+            .|. shiftL (fromIntegral w3) 16
+            .|. shiftL (fromIntegral w2) 8
+            .|.        (fromIntegral w1)
+    {-# INLINE beginChunk #-}
+
+-- | /O(n)/ Convert a 'ByteString' into a 'Stream Char', using big
+-- endian UTF-32 encoding.
+streamUtf32BE :: B.ByteString -> DecodeResult
+streamUtf32BE =
+    beginChunk S0
+  where
+    beginChunk :: S -> B.ByteString -> DecodeResult
+    beginChunk s bs | B.null bs =
+        case s of
+            S0 -> DecodeResultSuccess T.empty (beginChunk S0)
+            _  -> DecodeResultFailure T.empty $ toBS s
+    beginChunk s0 ps = runST $ do
+        let initLen = B.length ps `div` 4
+        marr <- A.new (initLen + 1)
+        let start !i !j
+                | i >= len = do
+                    t <- getText j marr
+                    return $! DecodeResultSuccess t (beginChunk S0)
+                | i + 3 < len && U32.validate x1 = addChar' 4 (unsafeChr32 x1)
+                | i + 3 < len = do
+                    t <- getText j marr
+                    return $! DecodeResultFailure t (B.unsafeDrop i ps)
+                | i + 2 < len = continue (S3 a b c)
+                | i + 1 < len = continue (S2 a b)
+                | otherwise   = continue (S1 a)
+                  where
+                    a = B.unsafeIndex ps i
+                    b = B.unsafeIndex ps (i+1)
+                    c = B.unsafeIndex ps (i+2)
+                    d = B.unsafeIndex ps (i+3)
+                    x1   = combine a b c d
+                    addChar' deltai char = do
+                        deltaj <- unsafeWrite marr j char
+                        start (i + deltai) (j + deltaj)
+                    continue s = do
+                        t <- getText j marr
+                        return $! DecodeResultSuccess t (beginChunk s)
+
+            checkCont s !i | i >= len = return $! DecodeResultSuccess T.empty (beginChunk s)
+            checkCont s !i =
+                case s of
+                    S0 -> start i 0
+                    S1 a -> checkCont (S2 a x) (i + 1)
+                    S2 a b -> checkCont (S3 a b x) (i + 1)
+                    S3 a b c ->
+                        let x1 = combine a b c x
+                         in if U32.validate x1
+                                then addChar' (unsafeChr32 x1)
+                                else return $! DecodeResultFailure T.empty
+                                            $! B.append (toBS s) (B.unsafeDrop i ps)
+              where
+                x = B.unsafeIndex ps i
+                addChar' c = do
+                    d <- unsafeWrite marr 0 c
+                    start (i + 1) d
+
+        checkCont s0 0
+      where
+        len = B.length ps
+        combine w1 w2 w3 w4 =
+                shiftL (fromIntegral w1) 24
+            .|. shiftL (fromIntegral w2) 16
+            .|. shiftL (fromIntegral w3) 8
+            .|.        (fromIntegral w4)
+    {-# INLINE beginChunk #-}

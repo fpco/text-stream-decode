@@ -55,7 +55,7 @@ benchmark count-chars
                   , bytestring
                   , text
     main-is:        count-chars.hs
-    ghc-options:    -O2
+    ghc-options:    -Wall -O2
 
 source-repository head
   type:     git
