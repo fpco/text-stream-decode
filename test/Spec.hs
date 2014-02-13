@@ -106,6 +106,17 @@ main = hspec $ modifyMaxSuccess (const 10000) $ do
                             _ -> error "fail on dec2"
                     _ -> error "fail on dec1"
 
+    describe "UTF16LE spot checks" $ do
+        it "[[0,216,0],[220,0,0,0,0,0,0]]" $ do
+            let bss = map S.pack [[0,216,0],[220,0,0,0,0,0,0]]
+                lbs = L.fromChunks bss
+            x <- try' $ feedLazy SD.streamUtf16LE lbs
+            y <- try' $ TLE.decodeUtf16LE lbs
+            case (x, y) of
+                (Right x', Right y') -> x' `shouldBe` y'
+                (Left _, Left _) -> return ()
+                _ -> error $ show (x, y)
+
 feedLazy :: (S.ByteString -> SD.DecodeResult)
          -> L.ByteString
          -> TL.Text
