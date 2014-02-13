@@ -8,14 +8,16 @@ import qualified Data.ByteString.Lazy as L
 import Control.Exception (evaluate, try, SomeException)
 import Control.DeepSeq (deepseq, NFData)
 import qualified Data.Text as T
+import qualified Data.Text.Encoding as TE
 import qualified Data.Text.Lazy as TL
+import Control.Monad (forM_)
 
 try' :: NFData a => a -> IO (Either SomeException a)
 try' a = try $ evaluate (a `deepseq` a)
 
 main :: IO ()
 main = hspec $ modifyMaxSuccess (const 10000) $ do
-    let test name lazy stream = describe name $ do
+    let test name lazy stream encodeStrict = describe name $ do
             prop "bytes" $ check lazy stream
             prop "chars" $ \css -> do
                 let ts = map T.pack css
@@ -24,6 +26,16 @@ main = hspec $ modifyMaxSuccess (const 10000) $ do
                     bss = L.toChunks lbs
                     wss = map S.unpack bss
                  in check lazy stream wss
+            it "high code points" $ forM_ [10, 20..50000] $ \cnt -> do
+                let t = T.replicate cnt "\x10000"
+                    bs = encodeStrict t
+                case stream bs of
+                    SD.DecodeResultSuccess t' dec -> do
+                        t' `shouldBe` t
+                        case dec S.empty of
+                            SD.DecodeResultSuccess _ _ -> return ()
+                            SD.DecodeResultFailure _ _ -> error "unexpected failure 1"
+                    SD.DecodeResultFailure _ _ -> error "unexpected failure 2"
 
         check lazy stream wss = do
             let bss = map S.pack wss
@@ -34,12 +46,12 @@ main = hspec $ modifyMaxSuccess (const 10000) $ do
                 (Right x', Right y') -> x' `shouldBe` y'
                 (Left _, Left _) -> return ()
                 _ -> error $ show (x, y)
-    test "UTF8" TLE.decodeUtf8 SD.streamUtf8
-    test "UTF8 pure" TLE.decodeUtf8 SD.streamUtf8Pure
-    test "UTF16LE" TLE.decodeUtf16LE SD.streamUtf16LE
-    test "UTF16BE" TLE.decodeUtf16BE SD.streamUtf16BE
-    test "UTF32LE" TLE.decodeUtf32LE SD.streamUtf32LE
-    test "UTF32BE" TLE.decodeUtf32BE SD.streamUtf32BE
+    test "UTF8" TLE.decodeUtf8 SD.streamUtf8 TE.encodeUtf8
+    test "UTF8 pure" TLE.decodeUtf8 SD.streamUtf8Pure TE.encodeUtf8
+    test "UTF16LE" TLE.decodeUtf16LE SD.streamUtf16LE TE.encodeUtf16LE
+    test "UTF16BE" TLE.decodeUtf16BE SD.streamUtf16BE TE.encodeUtf16BE
+    test "UTF32LE" TLE.decodeUtf32LE SD.streamUtf32LE TE.encodeUtf32LE
+    test "UTF32BE" TLE.decodeUtf32BE SD.streamUtf32BE TE.encodeUtf32BE
 
     describe "UTF8 leftovers" $ do
         describe "C" $ do

@@ -374,7 +374,7 @@ streamUtf32LE =
             S0 -> DecodeResultSuccess T.empty (beginChunk S0)
             _  -> DecodeResultFailure T.empty $ toBS s
     beginChunk s0 ps = runST $ do
-        let initLen = B.length ps `div` 4
+        let initLen = B.length ps `div` 2
         marr <- A.new (initLen + 1)
         let start !i !j
                 | i >= len = do
@@ -440,7 +440,7 @@ streamUtf32BE =
             S0 -> DecodeResultSuccess T.empty (beginChunk S0)
             _  -> DecodeResultFailure T.empty $ toBS s
     beginChunk s0 ps = runST $ do
-        let initLen = B.length ps `div` 4
+        let initLen = B.length ps `div` 2
         marr <- A.new (initLen + 1)
         let start !i !j
                 | i >= len = do
