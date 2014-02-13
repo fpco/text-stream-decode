@@ -11,6 +11,7 @@ import qualified Data.Text as T
 import qualified Data.Text.Encoding as TE
 import qualified Data.Text.Lazy as TL
 import Control.Monad (forM_)
+import Data.ByteString.Char8 ()
 
 try' :: NFData a => a -> IO (Either SomeException a)
 try' a = try $ evaluate (a `deepseq` a)
