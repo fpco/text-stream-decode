@@ -1,5 +1,10 @@
-{-# LANGUAGE Rank2Types #-}
-{-# LANGUAGE BangPatterns #-}
+{-# LANGUAGE BangPatterns               #-}
+{-# LANGUAGE CPP                        #-}
+{-# LANGUAGE ForeignFunctionInterface   #-}
+{-# LANGUAGE GeneralizedNewtypeDeriving #-}
+{-# LANGUAGE MagicHash                  #-}
+{-# LANGUAGE Rank2Types                 #-}
+{-# LANGUAGE UnliftedFFITypes           #-}
 
 -- |
 -- Module      : Data.Text.Lazy.Encoding.Fusion
@@ -31,6 +36,7 @@ module Data.Text.StreamDecoding
     (
     -- * Streaming
       streamUtf8
+    , streamUtf8Pure
     , streamUtf16LE
     , streamUtf16BE
     , streamUtf32LE
@@ -41,8 +47,10 @@ module Data.Text.StreamDecoding
     ) where
 
 import           Control.Monad.ST                  (ST, runST)
+import           Control.Monad.ST.Unsafe           (unsafeIOToST, unsafeSTToIO)
+import           Data.Bits                         ((.|.))
 import qualified Data.ByteString                   as B
-import Data.Bits ((.|.))
+import           Data.ByteString.Internal          (ByteString (PS))
 import qualified Data.ByteString.Unsafe            as B
 import           Data.Text                         (Text)
 import qualified Data.Text                         as T
@@ -55,7 +63,14 @@ import           Data.Text.Internal.Unsafe.Char    (unsafeChr, unsafeChr32,
                                                     unsafeChr8)
 import           Data.Text.Internal.Unsafe.Char    (unsafeWrite)
 import           Data.Text.Internal.Unsafe.Shift   (shiftL)
-import           Data.Word                         (Word8)
+import           Data.Word                         (Word32, Word8)
+import           Foreign.C.Types                   (CSize (..))
+import           Foreign.ForeignPtr                (withForeignPtr)
+import           Foreign.Marshal.Utils             (with)
+import           Foreign.Ptr                       (Ptr, minusPtr, nullPtr,
+                                                    plusPtr)
+import           Foreign.Storable                  (Storable, peek, poke)
+import           GHC.Base                          (MutableByteArray#)
 
 data S = S0
        | S1 {-# UNPACK #-} !Word8
@@ -80,10 +95,73 @@ getText j marr = do
     return $! textP arr 0 j
 {-# INLINE getText #-}
 
+#include "text_cbits.h"
+
+foreign import ccall unsafe "_hs_text_stream_decode_decode_utf8_state" c_decode_utf8_with_state
+    :: MutableByteArray# s -> Ptr CSize
+    -> Ptr (Ptr Word8) -> Ptr Word8
+    -> Ptr CodePoint -> Ptr DecoderState -> IO (Ptr Word8)
+
+newtype CodePoint = CodePoint Word32 deriving (Eq, Show, Num, Storable)
+newtype DecoderState = DecoderState Word32 deriving (Eq, Show, Num, Storable)
+
 -- | /O(n)/ Convert a lazy 'ByteString' into a 'Stream Char', using
 -- UTF-8 encoding.
 streamUtf8 :: B.ByteString -> DecodeResult
-streamUtf8 =
+streamUtf8 = decodeChunk 0 0
+ where
+  decodeChunkCheck :: B.ByteString -> CodePoint -> DecoderState -> B.ByteString -> DecodeResult
+  decodeChunkCheck bsOld codepoint state bs
+    | B.null bs =
+        if B.null bsOld
+            then DecodeResultSuccess T.empty streamUtf8
+            else DecodeResultFailure T.empty bsOld
+    | otherwise = decodeChunk codepoint state bs
+  -- We create a slightly larger than necessary buffer to accommodate a
+  -- potential surrogate pair started in the last buffer
+  decodeChunk :: CodePoint -> DecoderState -> B.ByteString -> DecodeResult
+  decodeChunk codepoint0 state0 bs@(PS fp off len) =
+    runST $ (unsafeIOToST . decodeChunkToBuffer) =<< A.new (len+1)
+   where
+    decodeChunkToBuffer :: A.MArray s -> IO DecodeResult
+    decodeChunkToBuffer dest = withForeignPtr fp $ \ptr ->
+      with (0::CSize) $ \destOffPtr ->
+      with codepoint0 $ \codepointPtr ->
+      with state0 $ \statePtr ->
+      with nullPtr $ \curPtrPtr ->
+        let end = ptr `plusPtr` (off + len)
+            loop curPtr = do
+              poke curPtrPtr curPtr
+              curPtr' <- c_decode_utf8_with_state (A.maBA dest) destOffPtr
+                         curPtrPtr end codepointPtr statePtr
+              state <- peek statePtr
+              case state of
+                UTF8_REJECT -> do
+                  -- We encountered an encoding error
+                  n <- peek destOffPtr
+                  chunkText <- unsafeSTToIO $ do
+                      arr <- A.unsafeFreeze dest
+                      return $! textP arr 0 (fromIntegral n)
+                  let consumed = minusPtr curPtr' ptr
+                      rest = B.unsafeDrop consumed bs
+                  return $! DecodeResultFailure chunkText rest
+                _ -> do
+                  -- We encountered the end of the buffer while decoding
+                  n <- peek destOffPtr
+                  codepoint <- peek codepointPtr
+                  chunkText <- unsafeSTToIO $ do
+                      arr <- A.unsafeFreeze dest
+                      return $! textP arr 0 (fromIntegral n)
+                  lastPtr <- peek curPtrPtr
+                  let left = lastPtr `minusPtr` curPtr
+                  return $! DecodeResultSuccess chunkText
+                         $! decodeChunkCheck (B.drop left bs) codepoint state
+        in loop (ptr `plusPtr` off)
+
+-- | /O(n)/ Convert a lazy 'ByteString' into a 'Stream Char', using
+-- UTF-8 encoding.
+streamUtf8Pure :: B.ByteString -> DecodeResult
+streamUtf8Pure =
     beginChunk S0
   where
     beginChunk :: S -> B.ByteString -> DecodeResult

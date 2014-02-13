@@ -11,6 +11,7 @@ Category:            Data, Text
 Build-type:          Simple
 Cabal-version:       >=1.8
 Homepage:            http://github.com/fpco/text-stream-decode
+extra-source-files:  include/text_cbits.h cbits/cbits.c
 
 flag text11
     default: False
@@ -31,7 +32,9 @@ Library
                        Data.Text.Internal.Encoding.Utf16
                        Data.Text.Internal.Encoding.Utf32
       hs-source-dirs:  ., text
-  ghc-options:     -Wall -O2
+  ghc-options:         -Wall -O2
+  c-sources:           cbits/cbits.c
+  include-dirs:        include
 
 test-suite test
     hs-source-dirs: test

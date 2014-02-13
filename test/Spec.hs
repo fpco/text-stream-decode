@@ -35,10 +35,19 @@ main = hspec $ modifyMaxSuccess (const 10000) $ do
                 (Left _, Left _) -> return ()
                 _ -> error $ show (x, y)
     test "UTF8" TLE.decodeUtf8 SD.streamUtf8
+    test "UTF8 pure" TLE.decodeUtf8 SD.streamUtf8Pure
     test "UTF16LE" TLE.decodeUtf16LE SD.streamUtf16LE
     test "UTF16BE" TLE.decodeUtf16BE SD.streamUtf16BE
     test "UTF32LE" TLE.decodeUtf32LE SD.streamUtf32LE
     test "UTF32BE" TLE.decodeUtf32BE SD.streamUtf32BE
+
+    it "UTF8 leftovers" $ do
+        let bs = "good\128\128bad"
+        case SD.streamUtf8 bs of
+            SD.DecodeResultSuccess _ _ -> error "Shouldn't have succeeded"
+            SD.DecodeResultFailure t bs' -> do
+                t `shouldBe` "good"
+                bs' `shouldBe` "\128\128bad"
 
 feedLazy :: (S.ByteString -> SD.DecodeResult)
          -> L.ByteString
