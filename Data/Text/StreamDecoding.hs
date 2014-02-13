@@ -108,7 +108,7 @@ newtype DecoderState = DecoderState Word32 deriving (Eq, Show, Num, Storable)
 -- | /O(n)/ Convert a lazy 'ByteString' into a 'Stream Char', using
 -- UTF-8 encoding.
 streamUtf8 :: B.ByteString -> DecodeResult
-streamUtf8 = decodeChunk 0 0
+streamUtf8 = decodeChunk B.empty 0 0
  where
   decodeChunkCheck :: B.ByteString -> CodePoint -> DecoderState -> B.ByteString -> DecodeResult
   decodeChunkCheck bsOld codepoint state bs
@@ -116,11 +116,11 @@ streamUtf8 = decodeChunk 0 0
         if B.null bsOld
             then DecodeResultSuccess T.empty streamUtf8
             else DecodeResultFailure T.empty bsOld
-    | otherwise = decodeChunk codepoint state bs
+    | otherwise = decodeChunk bsOld codepoint state bs
   -- We create a slightly larger than necessary buffer to accommodate a
   -- potential surrogate pair started in the last buffer
-  decodeChunk :: CodePoint -> DecoderState -> B.ByteString -> DecodeResult
-  decodeChunk codepoint0 state0 bs@(PS fp off len) =
+  decodeChunk :: B.ByteString -> CodePoint -> DecoderState -> B.ByteString -> DecodeResult
+  decodeChunk bsOld codepoint0 state0 bs@(PS fp off len) =
     runST $ (unsafeIOToST . decodeChunkToBuffer) =<< A.new (len+1)
    where
     decodeChunkToBuffer :: A.MArray s -> IO DecodeResult
@@ -132,30 +132,31 @@ streamUtf8 = decodeChunk 0 0
         let end = ptr `plusPtr` (off + len)
             loop curPtr = do
               poke curPtrPtr curPtr
-              curPtr' <- c_decode_utf8_with_state (A.maBA dest) destOffPtr
+              _ <- c_decode_utf8_with_state (A.maBA dest) destOffPtr
                          curPtrPtr end codepointPtr statePtr
               state <- peek statePtr
+              n <- peek destOffPtr
+              chunkText <- unsafeSTToIO $ do
+                  arr <- A.unsafeFreeze dest
+                  return $! textP arr 0 (fromIntegral n)
+              lastPtr <- peek curPtrPtr
+              let left = lastPtr `minusPtr` curPtr
+                  -- The logic here is: if any text was generated, then the
+                  -- previous leftovers were completely consumed already.
+                  -- If no text was generated, then any leftovers from the
+                  -- previous step are still leftovers now.
+                  unused
+                    | not $ T.null chunkText = B.unsafeDrop left bs
+                    | B.null bsOld = bs
+                    | otherwise = B.append bsOld bs
               case state of
-                UTF8_REJECT -> do
+                UTF8_REJECT ->
                   -- We encountered an encoding error
-                  n <- peek destOffPtr
-                  chunkText <- unsafeSTToIO $ do
-                      arr <- A.unsafeFreeze dest
-                      return $! textP arr 0 (fromIntegral n)
-                  let consumed = minusPtr curPtr' ptr
-                      rest = B.unsafeDrop consumed bs
-                  return $! DecodeResultFailure chunkText rest
+                  return $! DecodeResultFailure chunkText unused
                 _ -> do
-                  -- We encountered the end of the buffer while decoding
-                  n <- peek destOffPtr
                   codepoint <- peek codepointPtr
-                  chunkText <- unsafeSTToIO $ do
-                      arr <- A.unsafeFreeze dest
-                      return $! textP arr 0 (fromIntegral n)
-                  lastPtr <- peek curPtrPtr
-                  let left = lastPtr `minusPtr` curPtr
                   return $! DecodeResultSuccess chunkText
-                         $! decodeChunkCheck (B.drop left bs) codepoint state
+                         $! decodeChunkCheck unused codepoint state
         in loop (ptr `plusPtr` off)
 
 -- | /O(n)/ Convert a lazy 'ByteString' into a 'Stream Char', using

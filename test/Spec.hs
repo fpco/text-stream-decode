@@ -41,13 +41,57 @@ main = hspec $ modifyMaxSuccess (const 10000) $ do
     test "UTF32LE" TLE.decodeUtf32LE SD.streamUtf32LE
     test "UTF32BE" TLE.decodeUtf32BE SD.streamUtf32BE
 
-    it "UTF8 leftovers" $ do
-        let bs = "good\128\128bad"
-        case SD.streamUtf8 bs of
-            SD.DecodeResultSuccess _ _ -> error "Shouldn't have succeeded"
-            SD.DecodeResultFailure t bs' -> do
-                t `shouldBe` "good"
-                bs' `shouldBe` "\128\128bad"
+    describe "UTF8 leftovers" $ do
+        describe "C" $ do
+            it "single chunk" $ do
+                let bs = "good\128\128bad"
+                case SD.streamUtf8 bs of
+                    SD.DecodeResultSuccess _ _ -> error "Shouldn't have succeeded"
+                    SD.DecodeResultFailure t bs' -> do
+                        t `shouldBe` "good"
+                        bs' `shouldBe` "\128\128bad"
+
+            it "multi chunk, no good" $ do
+                let bs1 = "\226"
+                    bs2 = "\130"
+                    bs3 = "ABC"
+                case SD.streamUtf8 bs1 of
+                    SD.DecodeResultSuccess "" dec2 ->
+                        case dec2 bs2 of
+                            SD.DecodeResultSuccess "" dec3 ->
+                                case dec3 bs3 of
+                                    SD.DecodeResultFailure "" bs -> bs `shouldBe` "\226\130ABC"
+                                    _ -> error "fail on dec3"
+                            _ -> error "fail on dec2"
+                    _ -> error "fail on dec1"
+
+            it "multi chunk, good in the middle" $ do
+                let bs1 = "\226"
+                    bs2 = "\130\172\226"
+                    bs3 = "\130ABC"
+                case SD.streamUtf8 bs1 of
+                    SD.DecodeResultSuccess "" dec2 ->
+                        case dec2 bs2 of
+                            SD.DecodeResultSuccess "\x20AC" dec3 ->
+                                case dec3 bs3 of
+                                    SD.DecodeResultFailure "" bs -> bs `shouldBe` "\226\130ABC"
+                                    _ -> error "fail on dec3"
+                            _ -> error "fail on dec2"
+                    _ -> error "fail on dec1"
+        describe "pure" $ do
+            it "multi chunk, no good" $ do
+                let bs1 = "\226"
+                    bs2 = "\130"
+                    bs3 = "ABC"
+                case SD.streamUtf8Pure bs1 of
+                    SD.DecodeResultSuccess "" dec2 ->
+                        case dec2 bs2 of
+                            SD.DecodeResultSuccess "" dec3 ->
+                                case dec3 bs3 of
+                                    SD.DecodeResultFailure "" bs -> bs `shouldBe` "\226\130ABC"
+                                    _ -> error "fail on dec3"
+                            _ -> error "fail on dec2"
+                    _ -> error "fail on dec1"
 
 feedLazy :: (S.ByteString -> SD.DecodeResult)
          -> L.ByteString
