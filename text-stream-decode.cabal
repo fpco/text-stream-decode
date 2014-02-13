@@ -46,6 +46,17 @@ test-suite test
                    , deepseq
     ghc-options:     -Wall
 
+benchmark count-chars
+    type: exitcode-stdio-1.0
+    hs-source-dirs: bench
+    build-depends:  base
+                  , text-stream-decode
+                  , criterion
+                  , bytestring
+                  , text
+    main-is:        count-chars.hs
+    ghc-options:    -O2
+
 source-repository head
   type:     git
   location: git://github.com/fpco/text-stream-decode.git
