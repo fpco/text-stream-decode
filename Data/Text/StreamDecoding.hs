@@ -181,9 +181,9 @@ streamUtf8 =
                     b = B.unsafeIndex ps (i+1)
                     c = B.unsafeIndex ps (i+2)
                     d = B.unsafeIndex ps (i+3)
-                    addChar' deltai c = do
-                        d <- unsafeWrite marr j c
-                        start (i + deltai) (j + d)
+                    addChar' deltai char = do
+                        deltaj <- unsafeWrite marr j char
+                        start (i + deltai) (j + deltaj)
                     continue s = do
                         t <- getText j marr
                         return $! DecodeResultSuccess t (beginChunk s)
@@ -212,7 +212,6 @@ streamUtf8 =
       where
         len = B.length ps
     {-# INLINE beginChunk #-}
-{-# INLINE [0] streamUtf8 #-}
 
 -- | /O(n)/ Convert a 'ByteString' into a 'Stream Char', using little
 -- endian UTF-16 encoding.
