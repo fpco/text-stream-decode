@@ -6,7 +6,7 @@
 {-# LANGUAGE Rank2Types                 #-}
 {-# LANGUAGE UnliftedFFITypes           #-}
 
--- |
+--
 -- Module      : Data.Text.Lazy.Encoding.Fusion
 -- Copyright   : (c) 2009, 2010 Bryan O'Sullivan
 --
