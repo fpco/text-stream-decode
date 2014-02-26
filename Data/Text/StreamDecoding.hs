@@ -149,7 +149,7 @@ streamUtf8 = decodeChunk B.empty 0 0
                     | not $ T.null chunkText = B.unsafeDrop left bs
                     | B.null bsOld = bs
                     | otherwise = B.append bsOld bs
-              case state of
+              case unused `seq` state of
                 UTF8_REJECT ->
                   -- We encountered an encoding error
                   return $! DecodeResultFailure chunkText unused
